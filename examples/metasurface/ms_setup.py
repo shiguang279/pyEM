@@ -65,19 +65,6 @@ class MSSetup(SimSetup):
         # 将 cells 注入到 MSDesigner 中。
         # MSDesigner 负责管理整体的 Stackup 和 Array，并协调 Cells 的调用。
 
-        
-        # 内置设计 (Built-in designs):
-        #   rect            - 矩形贴片
-        #   cross           - 十字形
-        #   circle          - 圆形贴片 
-        #   ring            - 圆环
-        #   srr             - 开口谐振环 (SRR)
-        #   bowtie          - 领结形
-        #   h_shape         - H形
-        #   jerusalem_cross - 耶路撒冷十字
-        #   smith_srr       - Smith双SRR (PRL 2000经典)
-        #   concentric_rings- 同心矩形环 (Sci.Rep. 2018)
-
         self.design_name = "rect" # 默认设计名称
 
         # 在实例化 Designer 时使用 self.design_name
