@@ -110,7 +110,7 @@ def _execute_single_task_logic(worker_id: int, cst_project: CSTProject, single_t
         if cst_project.project:
             cst_project.project.activate()
         
-        logger.info(f"[Worker {worker_id}] 正在执行批次 {batch_idx} 任务 {task_id}")
+        logger.info(f"[Worker {worker_id}] 正在执行批次 {batch_idx} 任务 ID {task_id}")
         status_queue.put({
             'type': 'RUNNING',
             'worker_id': worker_id,
@@ -135,7 +135,11 @@ def _execute_single_task_logic(worker_id: int, cst_project: CSTProject, single_t
                 'result': result_data,
                 'status': 'success'
             }
-            data_queue.put(result_package)
+            try:
+                data_queue.put(result_package, timeout=10) 
+            except multiprocessing.queues.Full:
+                logger.error(f"[Worker {worker_id}] Data Queue 满了！主进程可能卡死。")
+        
             logger.info(f"[Worker {worker_id}] 批次 {batch_idx} 任务 {task_id} 已成功")
         else:
             logger.error(f"[Worker {worker_id}] 批次 {batch_idx} 任务 {task_id} 失败: {result.get('message')}")
@@ -152,9 +156,9 @@ def _execute_single_task_logic(worker_id: int, cst_project: CSTProject, single_t
             'exit_status': task_status
         }
         try:
-            status_queue.put(finish_report, timeout=5)
-        except Exception as e:
-            logger.error(f"[Worker {worker_id}] 发送完成信号失败: {e}")
+            status_queue.put(finish_report, timeout=10) 
+        except multiprocessing.queues.Full:
+            logger.error(f"[Worker {worker_id}] Status Queue 满了！主进程可能卡死。")
 
 # =================================================================================
 # 2. ParallelScheduler 类
@@ -344,7 +348,7 @@ class ParallelScheduler:
                     if msg is None:  # 收到 None 代表彻底结束信号
                         break
                     if msg['type'] == 'RUNNING':
-                        logger.info(f"任务 [批次{msg['batch_idx']}-任务{msg['task_idx']}] 开始运行")
+                        logger.info(f"任务 [批次{msg['batch_idx']}-任务 ID {msg['task_idx']}] 开始运行")
                 except:
                     continue
 
@@ -379,76 +383,77 @@ class ParallelScheduler:
                 pass
     
     def _run_batch_with_fresh_env(self, tasks: List[Dict], batch_idx: int, data_queue: multiprocessing.Queue, status_queue: multiprocessing.Queue) -> bool:
-        """
-        为单个批次创建全新的环境和 Worker。
-        批次跑完后，所有进程和软件都会被销毁，彻底释放内存。
-        """
         setup_dict = self.setup.to_dict()
         worker_processes = []
         worker_queues = []
         
         try:
-            # 每次启动新的 CST 进程
+            # 1. 启动全新的 CST Design Environment
             logger.info(f"批次 {batch_idx}: 正在启动全新的 CST Design Environment...")
-            self._restart_design_env() 
+            self._restart_design_env()
             main_de_pid = self.shared_design_env.pid
 
-            # 创建信号量
+            # 2. 启动 Worker 进程
             batch_semaphore = self.manager.Semaphore(self.num_workers)
-
-            # 启动全新的 Worker 进程 (这批 Worker 只活在这个批次里)
             for wid in range(self.num_workers):
                 project_file = self.worker_file_map[wid]
-                task_queue = multiprocessing.Queue()
+                task_queue = self.manager.Queue()
                 worker_queues.append(task_queue)
-                
-                args = (
-                    wid, project_file, main_de_pid, status_queue, data_queue,
-                    self.base_runner_type, setup_dict, task_queue, batch_semaphore
-                )
+                args = (wid, project_file, main_de_pid, status_queue, data_queue, self.base_runner_type, setup_dict, task_queue, batch_semaphore)
                 p = Process(target=_global_simulation_worker, args=args)
                 p.start()
                 worker_processes.append(p)
-                logger.info(f"Worker {wid} (PID: {p.pid}) 已启动，连接至新 CST 实例")
+                logger.info(f"Worker {wid} (PID: {p.pid}) 已启动")
 
-            # 4. 分发任务
-            for local_idx, task in enumerate(tasks):
-                wid = local_idx % self.num_workers
-                worker_queues[wid].put((task, batch_idx, local_idx))
-                if local_idx > 0:
-                    time.sleep(self.project_start_interval)
-
-            # 等待该批次所有任务完成
+            # --- 核心修复点：任务分发与计数逻辑 ---
             tasks_in_batch = len(tasks)
+            
+            # 1. 计算每个 Worker 应该分到多少任务
+            # 例如 10 个任务，2 个 Worker -> Worker0: 任务0,2,4,6,8 | Worker1: 任务1,3,5,7,9
+            worker_task_load = [[] for _ in range(self.num_workers)]
+            for local_idx, task in enumerate(tasks):
+                target_worker_id = local_idx % self.num_workers
+                worker_task_load[target_worker_id].append((task, local_idx))
+
+            # 2. 向每个 Worker 发送“任务列表”和“结束信号”
+            # 这样 Worker 可以自己内部循环，不用主进程反复发
+            for wid in range(self.num_workers):
+                task_list_for_this_worker = worker_task_load[wid]
+                # 发送 (任务数据, 批次ID, 任务ID) 的列表
+                # 最后加一个 None 作为结束标志
+                for task, task_id in task_list_for_this_worker:
+                    worker_queues[wid].put((task, batch_idx, task_id))
+                worker_queues[wid].put(None) # 发送结束信号，告诉 Worker “别等了，这批活干完了”
+
+            # 3. 等待所有任务完成 (逻辑简化)
+            # 现在我们只管数“收到多少个 FINISHED”
             finished_count = 0
             while finished_count < tasks_in_batch:
                 try:
-                    msg = status_queue.get(timeout=5)
+                    msg = status_queue.get(timeout=30)
                     if msg and msg['type'] == 'FINISHED':
                         finished_count += 1
-                        status_text = "成功" if msg['exit_status'] == 'success' else "失败"
-                        logger.info(f"批次 {batch_idx} 中任务 {msg['task_idx']} 已完成 ({status_text})")
-                except:
-                    # 检查是否有进程意外崩溃
-                    if any(p.exitcode is not None for p in worker_processes):
-                        logger.error("检测到有 Worker 进程意外崩溃！")
+                        task_id = msg['task_idx']
+                        logger.info(f"批次 {batch_idx}: 任务 {task_id} 完成，当前进度: {finished_count}/{tasks_in_batch}")
+                except queue.Empty:
+                    # 超时检查：防止死锁
+                    # 检查 Worker 进程是否还活着
+                    if any(not p.is_alive() for p in worker_processes):
+                        logger.error("检测到 Worker 进程意外退出")
                         return False
+                    continue
 
-            logger.info(f"批次 {batch_idx} 所有任务完成，准备销毁当前 CST 环境...")
             return True
-            
+
         except Exception as e:
             logger.error(f"批次 {batch_idx} 执行出错: {e}")
             return False
             
         finally:
-            # 通知所有 Worker 退出 (Worker 只活当前批次)
-            for q in worker_queues:
-                q.put(None)
-            # 等待 Worker 进程结束
+            # 4. 资源清理 (Worker 已经收到 None 自行退出，这里主要是防呆)
             for p in worker_processes:
-                p.join(timeout=2)
-            # Worker 结束后，关闭当前的 DesignEnv
+                if p.is_alive():
+                    p.join(timeout=10)
             if self.shared_design_env:
                 self.shared_design_env.close_env()
     
