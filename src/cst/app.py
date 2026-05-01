@@ -179,9 +179,9 @@ class CSTProject:
         
         logger.debug(f"项目已保存: {prj_file}")
     
-    def start_solver(self) -> None:
+    def run_solver(self) -> None:
         """
-        仅启动求解器进行计算。
+        启动求解器进行计算。直到仿真彻底跑完，才会把控制权交还给 Python
         """
         if self.project is None:
             raise RuntimeError("项目句柄未初始化，无法运行仿真。")
@@ -190,7 +190,8 @@ class CSTProject:
         try:
             # 调用底层接口运行求解器
             self.project.model3d.run_solver()
-            logger.debug(">>> CST 求解器计算完成。")
+            time.sleep(0.5)
+            logger.info(">>> CST 求解器计算完成。")
         except Exception as e:
             logger.error(f"求解器运行失败: {e}")
             raise
@@ -214,30 +215,20 @@ class CSTProject:
         if self.project is None:
             raise RuntimeError("仿真流程终止：项目句柄 (Project Handle) 未初始化。")
         
-        logger.debug(f"仿真开始运行: {prj_file}")
-        
         try:
-            # ==================================================
             # 阶段 1: 模型持久化 (Pre-Solve Save)
-            # ==================================================
             logger.debug(">>> 正在保存/加载仿真模型 (建立 Project 引用)...")
             self.save(prj_file, include_results=False)
 
-            # ==================================================
             # 阶段 2: 环境重置 (Safe to call now)
-            # ==================================================
             logger.debug(">>> 正在清除旧的仿真结果 (重置 Run ID)...")
             self.vba.delete_all_results()
 
-            # ==================================================
             # 3. 求解器执行
-            # ==================================================
-            logger.info("正在启动求解器进行计算...")
-            self.start_solver()
+            logger.info(">>> 运行求解器...")
+            self.run_solver()
 
-            # ==================================================
             # 4. 结果归档
-            # ==================================================
             logger.debug("正在保存仿真结果数据...")
             self.save(prj_file, include_results=True)
             
@@ -255,6 +246,7 @@ class CSTProject:
         if self.project is not None:
             try:
                 self.project.close()
+                time.sleep(2)
                 logger.debug("CST Project closed successfully.")
             except Exception as e:
                 logger.warning(f"关闭项目时发生异常 (可能已关闭): {e}")

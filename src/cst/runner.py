@@ -8,6 +8,7 @@ CST Studio Suite 仿真运行器模块 (CSTRunner)
 
 import os
 import time
+import traceback
 from typing import Dict, Any, Optional, List, Callable
 
 from src.core.sim_runner import SimRunner, register_runner, RunMode, SimulationMode
@@ -227,25 +228,22 @@ class CSTRunner(SimRunner):
         """
         logger.info(f">>> 执行扫描参数：{params}")
 
-        # 初始检查（为了 VBA 初始化）
-        if cst_project.project is None:
-            logger.debug(f"正在初始化并打开项目文件: {project_file}")
-            cst_project.open(project_file)
-
-        # --- 定义具体的业务逻辑 ---
-        def task_logic():
-            # 确保项目已打开
+        try:
+            # 初始检查：确保项目已打开
             if cst_project.project is None:
-                logger.debug("检测到项目未打开（重试模式），正在重新打开...")
+                logger.debug(f"正在初始化并打开项目文件: {project_file}")
                 cst_project.open(project_file)
-            # 确保 VBA 已绑定（依赖 open 方法中的 self.vba = CSTVBA(...)）
-            if cst_project.vba is None:
-                raise RuntimeError("VBA 接口初始化失败，请检查 CST 环境。")
 
             # 1. 同步参数
             for name, value in params.items():
-                vba_cmd = f'StoreParameter("{name}", "{value}")'
-                cst_project.vba.execute(f"{vba_cmd}")
+                try:
+                    vba_cmd = f'StoreParameter("{name}", "{value}")'
+                    cst_project.vba.execute(f"{vba_cmd}")
+                except Exception as e:
+                    # 捕获单个参数设置失败的异常，避免因为一个参数错误导致整个任务崩溃
+                    error_msg = f"设置参数 {name}={value} 失败: {e}"
+                    logger.error(error_msg)
+                    return {"status": "failed", "message": error_msg, "params": params}
 
             # 2. 重建模型
             cst_project.vba.execute("RebuildOnParametricChange(True, False)")
@@ -256,15 +254,18 @@ class CSTRunner(SimRunner):
 
             # 4. 提取数据
             extractor = CSTResultExtractor(cst_project, setup_dict=setup_dict)
-            return extractor.execute_export()
+            result = extractor.execute_export()
 
-        # --- 执行重试逻辑 ---
-        success, result = self._retry_on_failure(cst_project, task_logic)
+            return {"status": "success", "params": params, **result}
 
-        if success:
-            return {"params": params, **result}
-        else:
-            return {"params": params, "status": "error", "message": str(result)}
+        except Exception as e:
+            # 捕获整体任务的严重异常（如 CST 崩溃、连接断开等）
+            # 打印完整的堆栈跟踪信息，方便定位问题
+            error_trace = traceback.format_exc()
+            logger.error(f"执行参数化扫描时发生严重异常: {e}\n{error_trace}")
+            
+            # 向上抛出异常，让上层的 Worker 捕获并标记任务失败
+            raise RuntimeError(f"仿真任务执行失败: {e}") from e
 
     def _execute_topology_modeling(
         self, 
@@ -276,51 +277,60 @@ class CSTRunner(SimRunner):
         执行拓扑建模流程。
         """
         logger.debug(">>> 执行模式：拓扑建模 (TOPOLOGY_MODELING)")
-        # 初始检查（为了 VBA 初始化）
-        if cst_project.project is None:
-            logger.debug(f"正在初始化并打开项目文件: {project_file}")
-            cst_project.open(project_file)
 
-        # --- 定义具体的业务逻辑 ---
-        def task_logic():
-            # 确保项目已打开
+        try:
+            # 初始检查：确保项目已打开
             if cst_project.project is None:
-                logger.debug("检测到项目未打开（可能是重试），正在重新打开...")
+                logger.debug(f"正在初始化并打开项目文件: {project_file}")
                 cst_project.open(project_file)
-            
+
             # 确保 VBA 已绑定
-            # 依赖 open 方法中的 self.vba = CSTVBA(self.project)
             if cst_project.vba is None:
                 raise RuntimeError("VBA 接口未初始化，无法执行建模流程。")
 
             # 1. 建模流程
-            flow = CSTFlow(builder=self.builder, output_dir=self.output_dir)
-            sim_params = setup_dict.get("sim_params", {})
-            flow.sync_parameters_to_software(sim_params)
+            try:
+                flow = CSTFlow(builder=self.builder, output_dir=self.output_dir)
+                sim_params = setup_dict.get("sim_params", {})
+                flow.sync_parameters_to_software(sim_params)
 
-            designer = setup_dict.get("designer")
-            if not designer:
-                raise ValueError("配置中缺少 designer 对象")
-            flow.inject_designer(designer)
-            flow.execute_automated_modeling()
+                designer = setup_dict.get("designer")
+                if not designer:
+                    raise ValueError("配置中缺少 designer 对象")
+                flow.inject_designer(designer)
+                flow.execute_automated_modeling()
+            except Exception as e:
+                error_msg = f"拓扑建模流程执行失败: {e}"
+                logger.error(error_msg)
+                return {"status": "failed", "message": error_msg}
 
             # 2. 运行仿真
-            absolute_project_file = os.path.abspath(project_file)
-            # run_simulation 内部通常会处理打开/激活项目，但为了保险，依赖上面的 open 逻辑
-            
-            cst_project.run_simulation(prj_file=absolute_project_file)
+            try:
+                absolute_project_file = os.path.abspath(project_file)
+                cst_project.run_simulation(prj_file=absolute_project_file)
+            except Exception as e:
+                error_msg = f"仿真运行失败: {e}"
+                logger.error(error_msg)
+                return {"status": "failed", "message": error_msg}
 
             # 3. 提取数据
-            extractor = CSTResultExtractor(cst_project, setup_dict=self.setup_dict)
-            return extractor.execute_export()
+            try:
+                extractor = CSTResultExtractor(cst_project, setup_dict=self.setup_dict)
+                result = extractor.execute_export()
+                return {"status": "success", **result}
+            except Exception as e:
+                error_msg = f"结果数据提取失败: {e}"
+                logger.error(error_msg)
+                return {"status": "failed", "message": error_msg}
 
-        # --- 执行重试逻辑 ---
-        success, result = self._retry_on_failure(cst_project, task_logic)
-
-        if success:
-            return result
-        else:
-            return None
+        except Exception as e:
+            # 捕获整体任务的严重异常（如 CST 崩溃、连接断开等）
+            error_trace = traceback.format_exc()
+            logger.error(f"执行拓扑建模时发生严重异常: {e}\n{error_trace}")
+            
+            # 向上抛出异常，触发当前批次的 CST 进程重启
+            raise RuntimeError(f"拓扑建模任务执行失败: {e}") from e
+        
 
 # 注册 Runner 到工厂
 register_runner("CST", CSTRunner)

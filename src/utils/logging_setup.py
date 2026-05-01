@@ -18,10 +18,8 @@ def setup_logger(
     # 2. 强制生成带时间戳的文件名
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    if log_file_name:
-        final_log_file_name = f"{log_file_name}_{timestamp}.log"
-    else:
-        final_log_file_name = f"log_{timestamp}.log"
+    base_name = log_file_name or "log"
+    final_log_file_name = f"{base_name}_{timestamp}.log"
         
     log_file = log_dir / final_log_file_name
 
