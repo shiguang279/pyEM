@@ -7,7 +7,7 @@
 
 ## v0.01 仅支持 CST
 
-- Windows
+- Windows （不提供 Linux）
 - CST 版本 2025，推荐最新版本
 - **代码未经严格验证**，存在未知问题。
 - HFSS 和 COMSOL **不支持**。
