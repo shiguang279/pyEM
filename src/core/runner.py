@@ -55,18 +55,26 @@ class SimRunner(ABC):
         self.output_dir = output_dir
         self.run_mode: RunMode = run_mode
         self.simulation_mode: SimulationMode = simulation_mode 
-        # 用于标识是否使用共享的 DesignEnvironment 实例
-        self._shared_design_env_instance = None
         # 用于标识是否使用动态注入的 Setup 实例
         self._dynamic_setup_instance_for_runner = None
         self.setup_dict = None
+        self.design_env_instance = None
+        self.current_project = None
+    
+    @classmethod
+    def start_design_environment(cls):
+        """
+        类方法：启动底层的仿真软件环境。
+        """
+        raise NotImplementedError("子类必须实现 start_design_environment 方法以启动软件环境。")
 
     def set_shared_design_env(self, design_env_instance):
         """
-        为当前 Runner 实例设置共享的 DesignEnvironment。
-        调用此方法后，run 方法将使用共享实例，而非创建新的。
+        设置共享的 DesignEnvironment。
+        这是实现“主进程单例”的关键入口。
         """
-        self._shared_design_env_instance = design_env_instance
+        self.design_env_instance = design_env_instance
+        logger.debug(f"Runner 已绑定共享的 DesignEnvironment 实例 (PID: {getattr(design_env_instance, 'pid', 'Unknown')})")
 
     def set_dynamic_setup_instance(self, setup_instance):
         """
@@ -74,14 +82,21 @@ class SimRunner(ABC):
         调用此方法后，_execute_simulation_flow 将优先使用此实例。
         """
         self._dynamic_setup_instance_for_runner = setup_instance
+    
+    @abstractmethod
+    def close_project(self) -> None:
+        """
+        抽象方法：由子类实现。
+        仅关闭当前 Project，不关闭底层的 DesignEnvironment。
+        """
+        pass
 
     @abstractmethod
-    def run(self, project_instance: Any, setup_dict: Dict = None, params: Optional[Dict[str, Any]] = None, project_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def run(self, setup_dict: Dict = None, params: Optional[Dict[str, Any]] = None, project_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         抽象方法：子类必须实现具体的仿真运行逻辑。
         
         Args:
-            project_instance: 由外部调度器传入的项目实例（已激活）。
             params: 仿真参数字典。
             project_file: 项目文件路径，用于保存结果。
         """
@@ -92,10 +107,15 @@ class SimRunner(ABC):
         return "Unknown"
 
     @abstractmethod
-    def _create_project(self, design_env_instance):
+    def create_project(self, design_env_instance):
         """
-        [抽象方法] 创建并返回一个项目。
-        此方法在共享模式下被调用，接收一个共享的 DesignEnvironment 实例。
-        例如 CST 的 `CSTProject(design_env_instance)`。
+        抽象方法：创建并返回一个项目。
+        """
+        pass
+
+    @abstractmethod
+    def open_project(self, design_env_instance, project_file):
+        """
+        抽象方法：打开一个项目。
         """
         pass

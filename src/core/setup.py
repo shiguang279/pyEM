@@ -10,7 +10,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from src.core.sim_runner import SimulationMode, RunMode
+from src.core.runner import SimulationMode, RunMode
 from src.utils.logger import logger
 
 if TYPE_CHECKING:

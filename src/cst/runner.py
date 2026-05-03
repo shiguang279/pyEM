@@ -11,7 +11,7 @@ import time
 import traceback
 from typing import Dict, Any, Optional, List, Callable
 
-from src.core.sim_runner import SimRunner, register_runner, RunMode, SimulationMode
+from src.core.runner import SimRunner, register_runner, RunMode, SimulationMode
 from src.cst.flow import CSTFlow
 from src.cst.app import CSTDesignEnv, CSTProject
 from src.cst.result_extractor import CSTResultExtractor
@@ -34,8 +34,7 @@ class CSTRunner(SimRunner):
         self,
         output_dir: str = "output",
         run_mode: RunMode = RunMode.SAVE_AND_RUN,
-        simulation_mode: SimulationMode = SimulationMode.DESIGN,
-        shared_design_env: Optional[CSTDesignEnv] = None,
+        simulation_mode: SimulationMode = SimulationMode.DESIGN
     ):
         """
         初始化 CST 运行器。
@@ -46,21 +45,29 @@ class CSTRunner(SimRunner):
             simulation_mode: 仿真策略枚举（如 DESIGN, PARAMETRIC_MODELING）。
             shared_design_env: 外部传入的 CST 应用程序实例，用于多进程共享环境。
         """
+        # 强制要求通过 set_shared_design_env 方法注入
         super().__init__(output_dir, run_mode, simulation_mode)
-        self.design_env_instance = shared_design_env
-        self.use_shared_design_env = shared_design_env is not None
+        self.design_env_instance = None
+        self.use_shared_design_env = False
         self.builder: Optional[CSTStructureBuilder] = None
         self.strategy_map = {
             SimulationMode.DESIGN: self._execute_design,
             SimulationMode.PARAMETRIC_MODELING: self._execute_parametric_sweep,
             SimulationMode.TOPOLOGY_MODELING: self._execute_topology_modeling,
         }
+        # 持有的 Project 实例
+        self.current_project: CSTProject = None
 
     def get_software_name(self) -> str:
         """返回当前运行器支持的软件名称。"""
         return "CST"
 
-    def _create_project(self, design_env_instance: CSTDesignEnv) -> CSTProject:
+    @classmethod
+    def start_design_environment(cls):
+        """启动 CST 设计环境"""
+        return CSTDesignEnv(quiet=True)
+
+    def create_project(self, design_env_instance: CSTDesignEnv) -> CSTProject:
         """
         实例化一个新的 CST 工程对象。
 
@@ -70,37 +77,51 @@ class CSTRunner(SimRunner):
         Returns:
             CSTProject: 新创建的工程实例。
         """
-        return CSTProject(design_env_instance)
-
-    def _open_project_with_shared_env(
-        self, shared_design_env: CSTDesignEnv, project_file: str
-    ) -> CSTProject:
+        self.current_project = CSTProject(design_env_instance)
+        return self.current_project
+    
+    def open_project(self, design_env_instance: CSTDesignEnv, project_file: str) -> CSTProject:
         """
-        在共享环境中打开指定的工程文件。
-
+        强制打开指定的 CST 工程文件（极简版）。
+        
         Args:
-            shared_design_env: 共享的 CST 设计环境。
-            project_file: 目标工程文件的路径。
-
+            design_env_instance: CST 设计环境实例。
+            project_file: .cst 文件路径。
+            
         Returns:
             CSTProject: 打开的工程实例。
+            
+        Raises:
+            FileNotFoundError: 文件不存在时。
         """
-        project = CSTProject(shared_design_env)
-        logger.debug(f"使用共享环境打开项目: {project_file}")
-        project.open(project_file)
-        return project
+        if not os.path.exists(project_file):
+            raise FileNotFoundError(f"工程文件不存在: {project_file}")
 
-    def run(self, project_instance: CSTProject, setup_dict: Dict = None, 
-            params: Optional[Dict[str, Any]] = None, project_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """执行仿真流程。
+        if self.current_project:
+            self.current_project.close()
+            self.current_project = None
 
-        Args:
-            project_instance: 由外部调度器传入的已激活项目实例。
-            params: 仿真参数字典。
-            project_file: 项目文件路径，用于保存结果。
-
-        Returns:
-            包含执行状态和结果的字典。
+        self.design_env_instance = design_env_instance
+        self.current_project = CSTProject(design_env_instance)
+        self.current_project.open(project_file) 
+        
+        return self.current_project
+    
+    def close_project(self) -> None:
+        """
+        仅关闭当前打开的 Project。
+        这是 Worker 退出时必须调用的方法。
+        """
+        if self.current_project:
+            logger.debug("CSTRunner 正在关闭当前 Project...")
+            self.current_project.close() 
+            self.current_project = None
+        else:
+            logger.debug("CSTRunner 中没有活动的 Project 需要关闭。")
+    
+    def run(self, setup_dict: Dict = None, params: Optional[Dict[str, Any]] = None, project_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        执行仿真流程。
         """
         if not setup_dict:
             return {"status": "error", "message": "setup_dict is missing"}
@@ -111,24 +132,22 @@ class CSTRunner(SimRunner):
 
         # 2. 查找对应的处理函数
         handler = self.strategy_map.get(mode)
-
         if not handler:
             return {"status": "error", "message": f"未知的仿真模式: {mode}"}
 
         try:
             if mode == SimulationMode.DESIGN:
-                return handler(project_instance, setup_dict, setup_dict)
+                return handler(setup_dict, project_file)
             elif mode == SimulationMode.PARAMETRIC_MODELING:
-                return handler(project_instance, setup_dict, params, project_file)
+                return handler(setup_dict, params, project_file)
             elif mode == SimulationMode.TOPOLOGY_MODELING:
-                return handler(project_instance, setup_dict, project_file)
+                return handler(setup_dict, project_file)
         except Exception as e:
             logger.error(f"执行 {mode} 失败: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
     
     def _retry_on_failure(
         self, 
-        cst_project: CSTProject, 
         func: Callable[[], Any], 
         max_retries: int = 3
     ) -> tuple[bool, Any]:
@@ -146,14 +165,12 @@ class CSTRunner(SimRunner):
                 logger.warning(f"执行失败 (尝试 {attempt}/{max_retries}): {e}")
                 
                 if attempt < max_retries:
-                    
-                    # 1. 强制丢弃句柄
+                    # 1. 强制丢弃句柄，防止句柄污染导致后续操作失败
                     logger.debug("强制丢弃旧的 Project 句柄...")
-                    cst_project.project = None
-                    cst_project.vba = None
+                    self.current_project = None
                     
                     # 2. 等待系统释放文件锁和 CST 内部进程清理
-                    time.sleep(2)
+                    time.sleep(3)
                     
                 else:
                     logger.error("达到最大重试次数，任务彻底失败。")
@@ -162,38 +179,34 @@ class CSTRunner(SimRunner):
         return False, None
 
     def _execute_design(
-        self, cst_project: CSTProject, setup_dict: Dict[str, Any]
+        self, setup_dict: Dict[str, Any], project_file: str
     ) -> Optional[Dict[str, Any]]:
         """
-        执行设计模式流程。
+        执行设计模式流程（支持 GUI 交互循环）。
 
         Args:
             cst_project: CST 工程对象。
             setup_dict: 配置字典。
+            project_file: 项目文件路径。
 
         Returns:
             执行结果字典。
         """
         logger.info("执行设计模式...")
 
-        if cst_project is None:
-            logger.error("Project 对象为空，无法继续。")
-            return {"status": "error", "message": "Project object is None."}
-
         # 1. 路径准备
         design_name = setup_dict.get("design_name", "DefaultDesign")
-        cst_file_path = os.path.abspath(os.path.join(self.output_dir, f"{design_name}.cst"))
+        project_file = os.path.abspath(project_file if project_file else os.path.join(self.output_dir, f"{design_name}.cst"))
 
         # 2. 工程初始化
-        if os.path.exists(cst_file_path):
-            logger.info(f"打开已存在工程: {cst_file_path}")
-            cst_project.open(cst_file_path)
+        if os.path.exists(project_file):
+            logger.info(f"打开已存在工程: {project_file}")
+            self.current_project.open(project_file)
         else:
-            logger.info(f"创建新工程: {cst_file_path}")
-            cst_project.new_mws()
+            logger.info(f"创建新工程: {project_file}")
+            self.current_project.new_mws()
 
         # 3. 初始化 Flow 与参数同步
-        vba = cst_project.vba
         flow = CSTFlow(builder=self.builder, output_dir=self.output_dir)
         
         # 从字典读取参数并同步
@@ -204,21 +217,48 @@ class CSTRunner(SimRunner):
         designer = setup_dict.get("designer")
         if designer:
             flow.inject_designer(designer)
-            flow.execute_automated_modeling()
 
-        # 5. 保存并运行
-        cst_project.save(cst_file_path, include_results=False)
-        cst_project.run_simulation(cst_file_path)
+        # 5. GUI 交互循环：让用户手动操作，直到退出
+        while True:
+            logger.info(">>> 请在 CST GUI 界面中进行手动操作，完成后请在控制台输入 'y' 继续自动化建模，输入 'q' 退出操作：")
+            try:
+                user_input = input("是否继续自动化建模？(y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                # 处理终端强制退出或文件结束符
+                user_input = 'q'
 
-        # 6. 提取结果
-        extractor = CSTResultExtractor(cst_project, setup_dict=self.setup_dict)
-        extracted_data = extractor.execute_export()
+            if user_input in ['q', 'quit', 'n', 'no']:
+                logger.info("用户选择退出 GUI 交互模式，准备保存并运行仿真。")
+                break
+            elif user_input in ['y', 'yes', '']:
+                logger.info("用户确认继续，开始执行自动化建模...")
+                try:
+                    flow.execute_automated_modeling()
+                    logger.info("自动化建模完成。你可以继续在 GUI 中调整，或退出进行仿真。")
+                except Exception as e:
+                    logger.error(f"自动化建模步骤执行失败: {e}", exc_info=True)
+                    # 建模失败不中断循环，允许用户修正后重试
+            else:
+                logger.warning(f"输入无效：'{user_input}'，请输入 'y' 继续或 'q' 退出。")
 
-        return {"status": "success", "path": cst_file_path, **extracted_data}
+        # 6. 运行仿真
+        try:
+            self.current_project.run_simulation(project_file)
+        except Exception as e:
+            logger.error(f"保存或运行仿真失败: {e}", exc_info=True)
+            return {"status": "failed", "message": f"仿真运行失败: {e}"}
+
+        # 7. 提取结果
+        try:
+            extractor = CSTResultExtractor(self.current_project, setup_dict=setup_dict)
+            extracted_data = extractor.execute_export()
+            return {"status": "success", "path": project_file, **extracted_data}
+        except Exception as e:
+            logger.error(f"结果数据提取失败: {e}", exc_info=True)
+            return {"status": "failed", "message": f"结果提取失败: {e}"}
 
     def _execute_parametric_sweep(
         self,
-        cst_project: CSTProject,
         setup_dict: Dict[str, Any],
         params: Dict[str, Any],
         project_file: str,
@@ -229,47 +269,49 @@ class CSTRunner(SimRunner):
         logger.info(f">>> 执行扫描参数：{params}")
 
         try:
-            # 初始检查：确保项目已打开
-            if cst_project.project is None:
-                logger.debug(f"正在初始化并打开项目文件: {project_file}")
-                cst_project.open(project_file)
 
             # 1. 同步参数
             for name, value in params.items():
                 try:
                     vba_cmd = f'StoreParameter("{name}", "{value}")'
-                    cst_project.vba.execute(f"{vba_cmd}")
+                    self.current_project.vba.execute(f"{vba_cmd}")
                 except Exception as e:
-                    # 捕获单个参数设置失败的异常，避免因为一个参数错误导致整个任务崩溃
+                    # 捕获单个参数设置失败的异常
                     error_msg = f"设置参数 {name}={value} 失败: {e}"
                     logger.error(error_msg)
-                    return {"status": "failed", "message": error_msg, "params": params}
+                    return {"status": "failed", "message": error_msg, "params": params, "error_type": "Param_Setup"}
 
             # 2. 重建模型
-            cst_project.vba.execute("RebuildOnParametricChange(True, False)")
+            logger.debug(">>> 正在根据新参数重建模型...")
+            self.current_project.vba.execute("RebuildOnParametricChange(True, False)")
 
             # 3. 运行仿真
-            abs_project_file = os.path.abspath(project_file)
-            cst_project.run_simulation(prj_file=abs_project_file)
+            project_file = os.path.abspath(project_file)
+            self.current_project.run_simulation(project_file)
 
             # 4. 提取数据
-            extractor = CSTResultExtractor(cst_project, setup_dict=setup_dict)
+            extractor = CSTResultExtractor(self.current_project, setup_dict=setup_dict)
             result = extractor.execute_export()
 
             return {"status": "success", "params": params, **result}
 
         except Exception as e:
             # 捕获整体任务的严重异常（如 CST 崩溃、连接断开等）
-            # 打印完整的堆栈跟踪信息，方便定位问题
             error_trace = traceback.format_exc()
             logger.error(f"执行参数化扫描时发生严重异常: {e}\n{error_trace}")
             
-            # 向上抛出异常，让上层的 Worker 捕获并标记任务失败
-            raise RuntimeError(f"仿真任务执行失败: {e}") from e
+            # 关键修改：不再向上抛出异常，而是返回包含详细错误信息的字典
+            # 这样 Worker 进程不会崩溃，主进程也能收到具体的参数和报错堆栈
+            return {
+                "status": "failed", 
+                "message": f"仿真任务执行失败: {e}", 
+                "params": params, 
+                "full_traceback": error_trace,
+                "error_type": "Critical_Runtime_Error"
+            }
 
     def _execute_topology_modeling(
         self, 
-        cst_project: CSTProject, 
         setup_dict: Dict[str, Any], 
         project_file: str
     ) -> Optional[Dict[str, Any]]:
@@ -278,16 +320,11 @@ class CSTRunner(SimRunner):
         """
         logger.debug(">>> 执行模式：拓扑建模 (TOPOLOGY_MODELING)")
 
+        # 提前提取任务标识和设计上下文，方便在报错时回传
+        task_id = setup_dict.get('task_id', os.path.basename(project_file))
+        design_context = setup_dict.get('design_context', {})
+
         try:
-            # 初始检查：确保项目已打开
-            if cst_project.project is None:
-                logger.debug(f"正在初始化并打开项目文件: {project_file}")
-                cst_project.open(project_file)
-
-            # 确保 VBA 已绑定
-            if cst_project.vba is None:
-                raise RuntimeError("VBA 接口未初始化，无法执行建模流程。")
-
             # 1. 建模流程
             try:
                 flow = CSTFlow(builder=self.builder, output_dir=self.output_dir)
@@ -302,34 +339,57 @@ class CSTRunner(SimRunner):
             except Exception as e:
                 error_msg = f"拓扑建模流程执行失败: {e}"
                 logger.error(error_msg)
-                return {"status": "failed", "message": error_msg}
+                return {
+                    "status": "failed", 
+                    "message": error_msg, 
+                    "task_id": task_id, 
+                    "design_context": design_context,
+                    "stage": "MODELING" # 标记错误发生的具体阶段
+                }
 
             # 2. 运行仿真
             try:
-                absolute_project_file = os.path.abspath(project_file)
-                cst_project.run_simulation(prj_file=absolute_project_file)
+                project_file = os.path.abspath(project_file)
+                self.current_project.run_simulation(project_file)
             except Exception as e:
                 error_msg = f"仿真运行失败: {e}"
                 logger.error(error_msg)
-                return {"status": "failed", "message": error_msg}
+                return {
+                    "status": "failed", 
+                    "message": error_msg, 
+                    "task_id": task_id,
+                    "stage": "SIMULATION"
+                }
 
             # 3. 提取数据
             try:
-                extractor = CSTResultExtractor(cst_project, setup_dict=self.setup_dict)
+                extractor = CSTResultExtractor(self.current_project, setup_dict=setup_dict)
                 result = extractor.execute_export()
-                return {"status": "success", **result}
+                return {"status": "success", "task_id": task_id, **result}
             except Exception as e:
                 error_msg = f"结果数据提取失败: {e}"
                 logger.error(error_msg)
-                return {"status": "failed", "message": error_msg}
+                return {
+                    "status": "failed", 
+                    "message": error_msg, 
+                    "task_id": task_id,
+                    "stage": "EXTRACTION"
+                }
 
         except Exception as e:
             # 捕获整体任务的严重异常（如 CST 崩溃、连接断开等）
             error_trace = traceback.format_exc()
             logger.error(f"执行拓扑建模时发生严重异常: {e}\n{error_trace}")
             
-            # 向上抛出异常，触发当前批次的 CST 进程重启
-            raise RuntimeError(f"拓扑建模任务执行失败: {e}") from e
+            # 关键修改：不再抛出 RuntimeError，而是返回包含任务ID和上下文的错误字典
+            return {
+                "status": "failed", 
+                "message": f"拓扑建模任务执行失败: {e}", 
+                "task_id": task_id,
+                "design_context": design_context,
+                "full_traceback": error_trace,
+                "stage": "CRITICAL"
+            }
         
 
 # 注册 Runner 到工厂

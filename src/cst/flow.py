@@ -7,7 +7,7 @@
 
 import os
 from typing import Dict, Any
-from src.core.sim_flow import SimFlow 
+from src.core.flow import SimFlow 
 from src.utils.logger import logger
 from .structure import CSTStructureBuilder
 

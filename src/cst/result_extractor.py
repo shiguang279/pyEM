@@ -7,9 +7,9 @@ import h5py
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 import cst.results as cstr
-from src.core.sim_runner import SimulationMode
+from src.core.runner import SimulationMode
 from src.core.result_extractor import ResultExtractor
-from src.core.sim_setup import SimSetup
+from src.core.setup import SimSetup
 from src.cst.vba import CSTVBA
 from src.cst.app import CSTProject
 from src.utils.logger import logger
@@ -69,7 +69,7 @@ class CSTResultExtractor(ResultExtractor):
             raise ValueError("setup_dict 不能为 None")
         export_options = self.setup_dict.get('export_options')
         simulation_mode = self.setup_dict.get('simulation_mode')
-        logger.debug(f"开始执行导出任务, 配置项: {export_options}")
+        logger.info(f"开始执行数据导出任务, 配置项: {export_options}")
 
         result_dict = {}
         
