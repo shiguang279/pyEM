@@ -42,13 +42,15 @@ class CSTResultExtractor(ResultExtractor):
         if self.result_project is None:
             try:
                 # 1. 获取原始路径
-                filename = self.cst_project.filename()
+                filename = self.cst_project.file_path
+
+                if not filename:
+                    raise ValueError("当前 CST 项目没有关联的文件路径，无法加载结果。")
                 
                 # 强制转换为绝对路径，防止工作目录切换导致文件找不到
                 filename = os.path.abspath(filename)
                 
                 # 2. 加载结果文件
-                # allow_interactive=True: 允许与 CST GUI 共享文件锁，读取当前打开项目的结果
                 self.result_project = cstr.ProjectFile(filename, allow_interactive=True)
                 
                 logger.debug(f"CST 结果引擎已加载 (交互模式): {filename}")

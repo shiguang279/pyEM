@@ -110,10 +110,11 @@ class CSTProject(SimProject):
     def __init__(self, design_env_instance: CSTDesignEnv):
         super().__init__(design_env_instance)
         self.vba = None # VBA 接口实例
+        self.file_path = None
 
     def open(self, file_path: str) -> None:
-        path_obj = Path(file_path)
-        if not path_obj.exists():
+        file_path = Path(file_path)
+        if not file_path.exists():
             raise FileNotFoundError(f"无法打开文件，文件不存在: {file_path}")
 
         logger.debug(f"正在打开项目: {file_path}")
@@ -142,7 +143,7 @@ class CSTProject(SimProject):
             if self._project_handle is None:
                 raise RuntimeError("Project 句柄为空，无法初始化 VBA")
             self.vba = CSTVBA(self._project_handle)
-            self._file_path = path_obj
+            self.file_path = file_path
             logger.debug("VBA 接口绑定成功！")
         except Exception as vba_err:
             logger.error(f"致命错误：VBA 接口绑定失败！错误信息: {vba_err}")
@@ -153,7 +154,7 @@ class CSTProject(SimProject):
         if self._project_handle is None:
             self._project_handle = self.design_env.cst_de.new_mws()
             self.vba = CSTVBA(self._project_handle)
-            self._file_path = None
+            self.file_path = None
             logger.debug("已创建新的 MWS 项目")
         else:
             logger.warning("项目已存在，跳过新建。")
@@ -167,7 +168,7 @@ class CSTProject(SimProject):
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._project_handle.save(str(file_path), include_results=include_results, allow_overwrite=True)
-        self._file_path = file_path
+        self.file_path = file_path
         logger.debug(f"项目已保存: {prj_file}")
 
     def run_solver(self) -> None:
@@ -203,6 +204,6 @@ class CSTProject(SimProject):
             finally:
                 self._project_handle = None
                 self.vba = None
-                self._file_path = None
+                self.file_path = None
         else:
             logger.debug("当前没有打开的项目。")
