@@ -110,7 +110,6 @@ class CSTProject(SimProject):
     def __init__(self, design_env_instance: CSTDesignEnv):
         super().__init__(design_env_instance)
         self.vba = None # VBA 接口实例
-        self.file_path = None
 
     def open(self, file_path: str) -> None:
         file_path = Path(file_path)

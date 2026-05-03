@@ -60,6 +60,14 @@ class SimProject(ABC):
     @property
     def file_path(self) -> Optional[Path]:
         return self._file_path
+    
+    @file_path.setter
+    def file_path(self, value):
+        """允许外部或子类设置项目路径"""
+        if isinstance(value, str):
+            self._file_path = Path(value)
+        else:
+            self._file_path = value
 
     @abstractmethod
     def open(self, file_path: str) -> None:
@@ -80,7 +88,7 @@ class SimProject(ABC):
         """
         通用仿真流程模板 (Template Method)。
         子类可以重写具体步骤，但流程由父类控制。
-        
+
         清理以前的仿真结果 > 保存 > 求解 > 保存
         """
         if not prj_file:
